@@ -25,16 +25,18 @@ from tqdm import tqdm
 import pyngp as ngp # noqa
 
 def parse_args():
-	parser = argparse.ArgumentParser(description="Run neural graphics primitives testbed with additional configuration & output options")
+	parser = argparse.ArgumentParser(description="Run instant neural graphics primitives with additional configuration & output options")
 
-	parser.add_argument("--scene", "--training_data", default="", help="The scene to load. Can be the scene's name or a full path to the training data.")
-	parser.add_argument("--mode", default="", const="nerf", nargs="?", choices=["nerf", "sdf", "image", "volume"], help="Mode can be 'nerf', 'sdf', 'image' or 'volume'. Inferred from the scene if unspecified.")
+	parser.add_argument("files", nargs="*", help="Files to be loaded. Can be a scene, network config, snapshot, camera path, or a combination of those.")
+
+	parser.add_argument("--scene", "--training_data", default="", help="The scene to load. Can be the scene's name or a full path to the training data. Can be NeRF dataset, a *.obj/*.stl mesh for training a SDF, an image, or a *.nvdb volume.")
+	parser.add_argument("--mode", default="", type=str, help=argparse.SUPPRESS) # deprecated
 	parser.add_argument("--network", default="", help="Path to the network config. Uses the scene's default if unspecified.")
 
-	parser.add_argument("--load_snapshot", default="", help="Load this snapshot before training. recommended extension: .msgpack")
-	parser.add_argument("--save_snapshot", default="", help="Save this snapshot after training. recommended extension: .msgpack")
+	parser.add_argument("--load_snapshot", "--snapshot", default="", help="Load this snapshot before training. recommended extension: .ingp/.msgpack")
+	parser.add_argument("--save_snapshot", default="", help="Save this snapshot after training. recommended extension: .ingp/.msgpack")
 
-	parser.add_argument("--nerf_compatibility", action="store_true", help="Matches parameters with original NeRF. Can cause slowness and worse results on some scenes.")
+	parser.add_argument("--nerf_compatibility", action="store_true", help="Matches parameters with original NeRF. Can cause slowness and worse results on some scenes, but helps with high PSNR on synthetic scenes.")
 	parser.add_argument("--test_transforms", default="", help="Path to a nerf style transforms json from which we will compute PSNR.")
 	parser.add_argument("--near_distance", default=-1, type=float, help="Set the distance from the camera at which training rays start for nerf. <0 means use ngp default")
 	parser.add_argument("--exposure", default=0.0, type=float, help="Controls the brightness of the image. Positive numbers increase brightness, negative numbers decrease it.")
@@ -46,7 +48,6 @@ def parse_args():
 
 	parser.add_argument("--video_camera_path", default="", help="The camera path to render, e.g., base_cam.json.")
 	parser.add_argument("--video_camera_smoothing", action="store_true", help="Applies additional smoothing to the camera trajectory with the caveat that the endpoint of the camera path may not be reached.")
-	parser.add_argument("--video_loop_animation", action="store_true", help="Connect the last and first keyframes in a continuous loop.")
 	parser.add_argument("--video_fps", type=int, default=60, help="Number of frames per second.")
 	parser.add_argument("--video_n_seconds", type=int, default=1, help="Number of seconds the rendered video should be long.")
 	parser.add_argument("--video_spp", type=int, default=8, help="Number of samples per pixel. A larger number means less noise, but slower rendering.")
@@ -62,76 +63,64 @@ def parse_args():
 	parser.add_argument("--train", action="store_true", help="If the GUI is enabled, controls whether training starts immediately.")
 	parser.add_argument("--n_steps", type=int, default=-1, help="Number of steps to train for before quitting.")
 	parser.add_argument("--second_window", action="store_true", help="Open a second window containing a copy of the main output.")
+	parser.add_argument("--vr", action="store_true", help="Render to a VR headset.")
 
 	parser.add_argument("--sharpen", default=0, help="Set amount of sharpening applied to NeRF training images. Range 0.0 to 1.0.")
 
 
 	return parser.parse_args()
 
+def get_scene(scene):
+	for scenes in [scenes_sdf, scenes_nerf, scenes_image, scenes_volume]:
+		if scene in scenes:
+			return scenes[scene]
+	return None
+
 if __name__ == "__main__":
 	args = parse_args()
+	if args.vr: # VR implies having the GUI running at the moment
+		args.gui = True
 
-	args.mode = args.mode or mode_from_scene(args.scene) or mode_from_scene(args.load_snapshot)
-	if not args.mode:
-		raise ValueError("Must specify either a valid '--mode' or '--scene' argument.")
+	if args.mode:
+		print("Warning: the '--mode' argument is no longer in use. It has no effect. The mode is automatically chosen based on the scene.")
 
-	if args.mode == "sdf":
-		mode = ngp.TestbedMode.Sdf
-		configs_dir = os.path.join(ROOT_DIR, "configs", "sdf")
-		scenes = scenes_sdf
-	elif args.mode == "nerf":
-		mode = ngp.TestbedMode.Nerf
-		configs_dir = os.path.join(ROOT_DIR, "configs", "nerf")
-		scenes = scenes_nerf
-	elif args.mode == "image":
-		mode = ngp.TestbedMode.Image
-		configs_dir = os.path.join(ROOT_DIR, "configs", "image")
-		scenes = scenes_image
-	elif args.mode == "volume":
-		mode = ngp.TestbedMode.Volume
-		configs_dir = os.path.join(ROOT_DIR, "configs", "volume")
-		scenes = scenes_volume
-	else:
-		raise ValueError("Must specify either a valid '--mode' or '--scene' argument.")
+	testbed = ngp.Testbed()
+	testbed.root_dir = ROOT_DIR
 
-	base_network = os.path.join(configs_dir, "base.json")
-	if args.scene in scenes:
-		network = scenes[args.scene]["network"] if "network" in scenes[args.scene] else "base"
-		base_network = os.path.join(configs_dir, network+".json")
-	network = args.network if args.network else base_network
-	if not os.path.isabs(network):
-		network = os.path.join(configs_dir, network)
-
-	testbed = ngp.Testbed(mode)
-	testbed.nerf.sharpen = float(args.sharpen)
-	testbed.exposure = args.exposure
-	if mode == ngp.TestbedMode.Sdf:
-		testbed.tonemap_curve = ngp.TonemapCurve.ACES
+	for file in args.files:
+		scene_info = get_scene(file)
+		if scene_info:
+			file = os.path.join(scene_info["data_dir"], scene_info["dataset"])
+		testbed.load_file(file)
 
 	if args.scene:
-		scene = args.scene
-		if not os.path.exists(args.scene) and args.scene in scenes:
-			scene = os.path.join(scenes[args.scene]["data_dir"], scenes[args.scene]["dataset"])
-		testbed.load_training_data(scene)
+		scene_info = get_scene(args.scene)
+		if scene_info is not None:
+			args.scene = os.path.join(scene_info["data_dir"], scene_info["dataset"])
+			if not args.network and "network" in scene_info:
+				args.network = scene_info["network"]
+
+		testbed.load_training_data(args.scene)
 
 	if args.gui:
 		# Pick a sensible GUI resolution depending on arguments.
 		sw = args.width or 1920
 		sh = args.height or 1080
-		while sw*sh > 1920*1080*4:
+		while sw * sh > 1920 * 1080 * 4:
 			sw = int(sw / 2)
 			sh = int(sh / 2)
-		testbed.init_window(sw, sh, second_window = args.second_window or False)
+		testbed.init_window(sw, sh, second_window=args.second_window)
+		if args.vr:
+			testbed.init_vr()
 
 
 	if args.load_snapshot:
-		snapshot = args.load_snapshot
-		if not os.path.exists(snapshot) and snapshot in scenes:
-			snapshot = default_snapshot_filename(scenes[snapshot])
-		print("Loading snapshot ", snapshot)
-		testbed.load_snapshot(snapshot)
-	else:
-		testbed.reload_network_from_file(network)
+		scene_info = get_scene(args.load_snapshot)
+		if scene_info is not None:
+			args.load_snapshot = default_snapshot_filename(scene_info)
+		testbed.load_snapshot(args.load_snapshot)
+	elif args.network:
+		testbed.reload_network_from_file(args.network)
 
 	ref_transforms = {}
 	if args.screenshot_transforms: # try to load the given file straight away
@@ -139,13 +128,18 @@ if __name__ == "__main__":
 		with open(args.screenshot_transforms) as f:
 			ref_transforms = json.load(f)
 
+	if testbed.mode == ngp.TestbedMode.Sdf:
+		testbed.tonemap_curve = ngp.TonemapCurve.ACES
+
+	testbed.nerf.sharpen = float(args.sharpen)
+	testbed.exposure = args.exposure
 	testbed.shall_train = args.train if args.gui else True
 
 
-	testbed.nerf.render_with_camera_distortion = True
+	testbed.nerf.render_with_lens_distortion = True
 
-	network_stem = os.path.splitext(os.path.basename(network))[0]
-	if args.mode == "sdf":
+	network_stem = os.path.splitext(os.path.basename(args.network))[0] if args.network else "base"
+	if testbed.mode == ngp.TestbedMode.Sdf:
 		setup_colored_sdf(testbed, args.scene)
 
 	if args.near_distance >= 0.0:
@@ -170,10 +164,8 @@ if __name__ == "__main__":
 		# setting here.
 		testbed.nerf.cone_angle_constant = 0
 
-		# Optionally match nerf paper behaviour and train on a
-		# fixed white bg. We prefer training on random BG colors.
-		# testbed.background_color = [1.0, 1.0, 1.0, 1.0]
-		# testbed.nerf.training.random_bg_color = False
+		# Match nerf paper behaviour and train on a fixed bg.
+		testbed.nerf.training.random_bg_color = False
 
 	old_training_step = 0
 	n_steps = args.n_steps
@@ -210,7 +202,6 @@ if __name__ == "__main__":
 					tqdm_last_update = now
 
 	if args.save_snapshot:
-		print("Saving snapshot ", args.save_snapshot)
 		testbed.save_snapshot(args.save_snapshot, False)
 
 	if args.test_transforms:
@@ -233,55 +224,26 @@ if __name__ == "__main__":
 		testbed.snap_to_pixel_centers = True
 		spp = 8
 
-		testbed.nerf.rendering_min_transmittance = 1e-4
+		testbed.nerf.render_min_transmittance = 1e-4
 
-		testbed.fov_axis = 0
-		testbed.fov = test_transforms["camera_angle_x"] * 180 / np.pi
 		testbed.shall_train = False
+		testbed.load_training_data(args.test_transforms)
 
-		with tqdm(list(enumerate(test_transforms["frames"])), unit="images", desc=f"Rendering test frame") as t:
-			for i, frame in t:
-				p = frame["file_path"]
-				if "." not in p:
-					p = p + ".png"
-				ref_fname = os.path.join(data_dir, p)
-				if not os.path.isfile(ref_fname):
-					ref_fname = os.path.join(data_dir, p + ".png")
-					if not os.path.isfile(ref_fname):
-						ref_fname = os.path.join(data_dir, p + ".jpg")
-						if not os.path.isfile(ref_fname):
-							ref_fname = os.path.join(data_dir, p + ".jpeg")
-							if not os.path.isfile(ref_fname):
-								ref_fname = os.path.join(data_dir, p + ".exr")
-
-				ref_image = read_image(ref_fname)
-
-				# NeRF blends with background colors in sRGB space, rather than first
-				# transforming to linear space, blending there, and then converting back.
-				# (See e.g. the PNG spec for more information on how the `alpha` channel
-				# is always a linear quantity.)
-				# The following lines of code reproduce NeRF's behavior (if enabled in
-				# testbed) in order to make the numbers comparable.
-				if testbed.color_space == ngp.ColorSpace.SRGB and ref_image.shape[2] == 4:
-					# Since sRGB conversion is non-linear, alpha must be factored out of it
-					ref_image[...,:3] = np.divide(ref_image[...,:3], ref_image[...,3:4], out=np.zeros_like(ref_image[...,:3]), where=ref_image[...,3:4] != 0)
-					ref_image[...,:3] = linear_to_srgb(ref_image[...,:3])
-					ref_image[...,:3] *= ref_image[...,3:4]
-					ref_image += (1.0 - ref_image[...,3:4]) * testbed.background_color
-					ref_image[...,:3] = srgb_to_linear(ref_image[...,:3])
+		with tqdm(range(testbed.nerf.training.dataset.n_images), unit="images", desc=f"Rendering test frame") as t:
+			for i in t:
+				resolution = testbed.nerf.training.dataset.metadata[i].resolution
+				testbed.render_ground_truth = True
+				testbed.set_camera_to_training_view(i)
+				ref_image = testbed.render(resolution[0], resolution[1], 1, True)
+				testbed.render_ground_truth = False
+				image = testbed.render(resolution[0], resolution[1], spp, True)
 
 				if i == 0:
-					write_image("ref.png", ref_image)
+					write_image(f"ref.png", ref_image)
+					write_image(f"out.png", image)
 
-				testbed.set_nerf_camera_matrix(np.matrix(frame["transform_matrix"])[:-1,:])
-				image = testbed.render(ref_image.shape[1], ref_image.shape[0], spp, True)
-
-				if i == 0:
-					write_image("out.png", image)
-
-				diffimg = np.absolute(image - ref_image)
-				diffimg[...,3:4] = 1.0
-				if i == 0:
+					diffimg = np.absolute(image - ref_image)
+					diffimg[...,3:4] = 1.0
 					write_image("diff.png", diffimg)
 
 				A = np.clip(linear_to_srgb(image[...,:3]), 0.0, 1.0)
@@ -337,7 +299,6 @@ if __name__ == "__main__":
 
 	if args.video_camera_path:
 		testbed.load_camera_path(args.video_camera_path)
-		testbed.loop_animation = args.video_loop_animation
 
 		resolution = [args.width or 1920, args.height or 1080]
 		n_frames = args.video_n_seconds * args.video_fps

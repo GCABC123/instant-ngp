@@ -25,11 +25,9 @@
 #include <iostream>
 #include <vector>
 
-using namespace Eigen;
-
 NGP_NAMESPACE_BEGIN
 
-std::vector<Vector3f> load_obj(const std::string& filename) {
+std::vector<vec3> load_obj(const fs::path& path) {
 	tinyobj::attrib_t attrib;
 	std::vector<tinyobj::shape_t> shapes;
 	std::vector<tinyobj::material_t> materials;
@@ -37,19 +35,20 @@ std::vector<Vector3f> load_obj(const std::string& filename) {
 	std::string warn;
 	std::string err;
 
-	bool ret = tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, filename.c_str());
+	std::ifstream f{native_string(path), std::ios::in | std::ios::binary};
+	bool ret = tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, &f);
 
 	if (!warn.empty()) {
-		tlog::warning() << "Obj: " << warn;
+		tlog::warning() << warn << " while loading '" << path.str() << "'";
 	}
 
 	if (!err.empty()) {
-		throw std::runtime_error{fmt::format("Error loading obj: {}", err)};
+		throw std::runtime_error{fmt::format("Error loading '{}': {}", path.str(), err)};
 	}
 
-	std::vector<Vector3f> result;
+	std::vector<vec3> result;
 
-	tlog::success() << "Loaded mesh \"" << filename << "\" file with " << shapes.size() << " shapes.";
+	tlog::success() << "Loaded mesh \"" << path.str() << "\" file with " << shapes.size() << " shapes.";
 
 	// Loop over shapes
 	for (size_t s = 0; s < shapes.size(); s++) {
@@ -59,7 +58,7 @@ std::vector<Vector3f> load_obj(const std::string& filename) {
 			size_t fv = size_t(shapes[s].mesh.num_face_vertices[f]);
 
 			if (shapes[s].mesh.num_face_vertices[f] != 3) {
-				tlog::warning() << "Non-triangle face found in " << filename;
+				tlog::warning() << "Non-triangle face found in " << path.str();
 				index_offset += fv;
 				continue;
 			}

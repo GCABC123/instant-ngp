@@ -18,103 +18,84 @@
 
 NGP_NAMESPACE_BEGIN
 
-using namespace std;
-
 ThreadPool::ThreadPool()
-: ThreadPool{thread::hardware_concurrency()} {}
+: ThreadPool{std::thread::hardware_concurrency()} {}
 
-ThreadPool::ThreadPool(size_t maxNumThreads, bool force) {
+ThreadPool::ThreadPool(size_t max_num_threads, bool force) {
 	if (!force) {
-		maxNumThreads = min((size_t)thread::hardware_concurrency(), maxNumThreads);
+		max_num_threads = std::min((size_t)std::thread::hardware_concurrency(), max_num_threads);
 	}
-	startThreads(maxNumThreads);
-	mNumTasksInSystem.store(0);
+	start_threads(max_num_threads);
 }
 
 ThreadPool::~ThreadPool() {
-	shutdownThreads(mThreads.size());
+	wait_until_queue_completed();
+	shutdown_threads(m_threads.size());
 }
 
-void ThreadPool::startThreads(size_t num) {
-	mNumThreads += num;
-	for (size_t i = mThreads.size(); i < mNumThreads; ++i) {
-		mThreads.emplace_back([this, i] {
+void ThreadPool::start_threads(size_t num) {
+	m_num_threads += num;
+	for (size_t i = m_threads.size(); i < m_num_threads; ++i) {
+		m_threads.emplace_back([this, i] {
 			while (true) {
-				unique_lock<mutex> lock{mTaskQueueMutex};
+				std::unique_lock<std::mutex> lock{m_task_queue_mutex};
 
 				// look for a work item
-				while (i < mNumThreads && mTaskQueue.empty()) {
-					// if there are none wait for notification
-					mWorkerCondition.wait(lock);
+				while (i < m_num_threads && m_task_queue.empty()) {
+					// if there are none, signal that the queue is completed
+					// and wait for notification of new work items.
+					m_task_queue_completed_condition.notify_all();
+					m_worker_condition.wait(lock);
 				}
 
-				if (i >= mNumThreads) {
+				if (i >= m_num_threads) {
 					break;
 				}
 
-				function<void()> task{move(mTaskQueue.front())};
-				mTaskQueue.pop_front();
+				std::function<void()> task{move(m_task_queue.front())};
+				m_task_queue.pop_front();
 
 				// Unlock the lock, so we can process the task without blocking other threads
 				lock.unlock();
 
 				task();
-
-				mNumTasksInSystem--;
-
-				{
-					unique_lock<mutex> localLock{mSystemBusyMutex};
-
-					if (mNumTasksInSystem == 0) {
-						mSystemBusyCondition.notify_all();
-					}
-				}
 			}
 		});
 	}
 }
 
-void ThreadPool::shutdownThreads(size_t num) {
-	auto numToClose = min(num, mNumThreads);
+void ThreadPool::shutdown_threads(size_t num) {
+	auto num_to_close = std::min(num, m_num_threads);
 
 	{
-		lock_guard<mutex> lock{mTaskQueueMutex};
-		mNumThreads -= numToClose;
+		std::lock_guard<std::mutex> lock{m_task_queue_mutex};
+		m_num_threads -= num_to_close;
 	}
 
 	// Wake up all the threads to have them quit
-	mWorkerCondition.notify_all();
-	for (auto i = 0u; i < numToClose; ++i) {
-		mThreads.back().join();
-		mThreads.pop_back();
+	m_worker_condition.notify_all();
+	for (auto i = 0u; i < num_to_close; ++i) {
+		m_threads.back().join();
+		m_threads.pop_back();
 	}
 }
 
-void ThreadPool::waitUntilFinished() {
-	unique_lock<mutex> lock{mSystemBusyMutex};
-
-	if (mNumTasksInSystem == 0) {
-		return;
+void ThreadPool::set_n_threads(size_t num) {
+	if (m_num_threads > num) {
+		shutdown_threads(m_num_threads - num);
+	} else if (m_num_threads < num) {
+		start_threads(num - m_num_threads);
 	}
-
-	mSystemBusyCondition.wait(lock);
 }
 
-void ThreadPool::waitUntilFinishedFor(const chrono::microseconds Duration) {
-	unique_lock<mutex> lock{mSystemBusyMutex};
-
-	if (mNumTasksInSystem == 0) {
-		return;
-	}
-
-	mSystemBusyCondition.wait_for(lock, Duration);
+void ThreadPool::wait_until_queue_completed() {
+	std::unique_lock<std::mutex> lock{m_task_queue_mutex};
+	m_task_queue_completed_condition.wait(lock, [this]() { return m_task_queue.empty(); });
 }
 
-void ThreadPool::flushQueue() {
-	lock_guard<mutex> lock{mTaskQueueMutex};
-
-	mNumTasksInSystem -= mTaskQueue.size();
-	mTaskQueue.clear();
+void ThreadPool::flush_queue() {
+	std::lock_guard<std::mutex> lock{m_task_queue_mutex};
+	m_task_queue.clear();
 }
 
 NGP_NAMESPACE_END

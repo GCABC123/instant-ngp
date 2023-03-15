@@ -53,13 +53,13 @@ __global__ void kernel_takikawa(
 			data_in(1, i),
 			data_in(2, i),
 		},
-		[&](const TriangleOctreeDualNode& node, uint32_t level, Eigen::Vector3f pos) {
+		[&](const TriangleOctreeDualNode& node, uint32_t level, vec3 pos) {
 			if (level < starting_level) {
 				return;
 			}
 			level -= starting_level;
 
-			Eigen::Vector3f pos_derivative;
+			vec3 pos_derivative;
 
 			if (interpolation_type == tcnn::InterpolationType::Linear) {
 				NGP_PRAGMA_UNROLL
@@ -76,7 +76,7 @@ __global__ void kernel_takikawa(
 
 			if (data_out) {
 				// Tri-linear interpolation
-				tcnn::vector_t<T, N_FEATURES_PER_LEVEL> result = {0};
+				tcnn::vector_t<T, N_FEATURES_PER_LEVEL, true> result = {(T)0.0f};
 
 				NGP_PRAGMA_UNROLL
 				for (uint32_t idx = 0; idx < 8; ++idx) {
@@ -92,13 +92,7 @@ __global__ void kernel_takikawa(
 					}
 
 					int param_idx = node.vertices[idx] * N_FEATURES_PER_LEVEL;
-					auto val = *(tcnn::vector_t<T, N_FEATURES_PER_LEVEL>*)&grid[param_idx];
-
-					// Read params
-					NGP_PRAGMA_UNROLL
-					for (uint32_t feature = 0; feature < N_FEATURES_PER_LEVEL; ++feature) {
-						result[feature] += (T)(weight * (float)val[feature]);
-					}
+					result = fma((T)weight, *(tcnn::vector_t<T, N_FEATURES_PER_LEVEL, true>*)&grid[param_idx], result);
 				}
 
 				NGP_PRAGMA_UNROLL
@@ -113,7 +107,7 @@ __global__ void kernel_takikawa(
 
 				NGP_PRAGMA_UNROLL
 				for (uint32_t grad_dim = 0; grad_dim < 3; ++grad_dim) {
-					tcnn::vector_fullp_t<N_FEATURES_PER_LEVEL> grad = {0};
+					tcnn::vector_fullp_t<N_FEATURES_PER_LEVEL> grad = {0.0f};
 
 					NGP_PRAGMA_UNROLL
 					for (uint32_t idx = 0; idx < 4; ++idx) {
@@ -212,7 +206,7 @@ __global__ void kernel_takikawa_backward(
 			data_in(1, i),
 			data_in(2, i),
 		},
-		[&](const TriangleOctreeDualNode& node, uint32_t level, Eigen::Vector3f pos) {
+		[&](const TriangleOctreeDualNode& node, uint32_t level, vec3 pos) {
 			if (level < starting_level) {
 				return;
 			}
@@ -297,7 +291,7 @@ public:
 			throw std::runtime_error{"Starting level must be below octree depth."};
 		}
 
-		m_n_padded_output_dims = m_n_output_dims = N_FEATURES_PER_LEVEL * n_levels();
+		m_n_output_dims = N_FEATURES_PER_LEVEL * n_levels();
 
 		if (N_FEATURES_PER_LEVEL != 1 && N_FEATURES_PER_LEVEL != 2 && N_FEATURES_PER_LEVEL != 4 && N_FEATURES_PER_LEVEL != 8) {
 			throw std::runtime_error{"Number of features per level must be 1, 2, 4, or 8."};
@@ -315,7 +309,7 @@ public:
 	) override {
 		auto forward = std::make_unique<ForwardContext>();
 
-		if ((!output && !prepare_input_gradients) || m_n_padded_output_dims == 0) {
+		if ((!output && !prepare_input_gradients) || padded_output_width() == 0) {
 			return forward;
 		}
 
@@ -330,7 +324,7 @@ public:
 			m_interpolation_type,
 			m_octree->nodes_gpu(),
 			m_octree->dual_nodes_gpu(),
-			use_inference_params ? m_params_inference : m_params,
+			use_inference_params ? this->inference_params() : this->params(),
 			input.view(),
 			output ? output->view() : tcnn::MatrixView<T>{},
 			forward->dy_dx.data()
@@ -350,7 +344,7 @@ public:
 		tcnn::EGradientMode param_gradients_mode = tcnn::EGradientMode::Overwrite
 	) override {
 		const uint32_t num_elements = input.n();
-		if (m_n_padded_output_dims == 0 || num_elements == 0) {
+		if (padded_output_width() == 0 || num_elements == 0) {
 			return;
 		}
 
@@ -366,7 +360,7 @@ public:
 				params_gradient_tmp = tcnn::allocate_workspace(stream, n_params() * sizeof(grad_t));
 				params_gradient = (grad_t*)params_gradient_tmp.data();
 			} else {
-				params_gradient = (grad_t*)m_params_gradient;
+				params_gradient = (grad_t*)this->gradients();
 			}
 
 			if (param_gradients_mode == tcnn::EGradientMode::Overwrite) {
@@ -386,7 +380,7 @@ public:
 			);
 
 			if (!std::is_same<grad_t, T>::value) {
-				parallel_for_gpu(stream, n_params(), [grad=m_params_gradient, grad_tmp=params_gradient] __device__ (size_t i) {
+				parallel_for_gpu(stream, n_params(), [grad=this->gradients(), grad_tmp=params_gradient] __device__ (size_t i) {
 					grad[i] = (T)grad_tmp[i];
 				});
 			}
@@ -409,38 +403,30 @@ public:
 	}
 
 	uint32_t padded_output_width() const override {
-		return m_n_padded_output_dims;
+		return m_n_output_dims + m_n_to_pad;
 	}
 
 	uint32_t output_width() const override {
-		return m_n_padded_output_dims;
+		return padded_output_width();
 	}
 
 	uint32_t required_input_alignment() const override {
 		return 1;
 	}
 
-	void set_alignment(uint32_t alignment) override {
-		if (m_n_output_dims != tcnn::next_multiple(m_n_output_dims, alignment)) {
-			throw std::runtime_error{fmt::format("TakikawaEncoding only supports number of output dims that divide into {}; n_n_output_dims={}.", alignment, m_n_output_dims)};
-		}
+	void set_padded_output_width(uint32_t padded_output_width) override {
+		CHECK_THROW(padded_output_width == m_n_output_dims);
 	}
 
-	uint32_t min_alignment() const override {
+	uint32_t required_output_alignment() const override {
 		return N_FEATURES_PER_LEVEL;
 	}
 
-	void set_params(T* params, T* inference_params, T* backward_params, T* gradients) override {
-		m_params = params;
-		m_params_inference = inference_params;
-		m_params_gradient = gradients;
-	}
+	void set_params_impl(T* params, T* inference_params, T* gradients) override { }
 
-	void initialize_params(tcnn::pcg32& rnd, float* params_full_precision, T* params, T* inference_params, T* backward_params, T* gradients, float scale = 1) override {
-		set_params(params, inference_params, backward_params, gradients);
-
+	void initialize_params(tcnn::pcg32& rnd, float* params_full_precision, float scale = 1) override {
 		// Initialize the encoding from the GPU, because the number of parameters can be quite large.
-		tcnn::generate_random_uniform<float>(rnd, n_params(), params_full_precision, -1e-4f, 1e-4f);
+		tcnn::generate_random_uniform<float>(rnd, n_params(), params_full_precision, -1e-4f * scale, 1e-4f * scale);
 	}
 
 	size_t n_params() const override {
@@ -473,12 +459,7 @@ private:
 	// derived sizes
 	uint32_t m_n_input_dims;
 	uint32_t m_n_output_dims;
-	uint32_t m_n_padded_output_dims;
-
-	// Storage of params
-	T* m_params;
-	T* m_params_inference;
-	T* m_params_gradient;
+	uint32_t m_n_to_pad = 0;
 
 	std::shared_ptr<TriangleOctree> m_octree;
 	tcnn::InterpolationType m_interpolation_type;

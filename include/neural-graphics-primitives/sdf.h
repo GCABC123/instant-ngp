@@ -21,41 +21,42 @@
 NGP_NAMESPACE_BEGIN
 
 struct SdfPayload {
-	Eigen::Vector3f dir;
+	vec3 dir;
 	uint32_t idx;
 	uint16_t n_steps;
 	bool alive;
 };
 
 struct RaysSdfSoa {
-#ifdef __NVCC__
-	void enlarge(size_t n_elements) {
-		pos.enlarge(n_elements);
-		normal.enlarge(n_elements);
-		distance.enlarge(n_elements);
-		prev_distance.enlarge(n_elements);
-		total_distance.enlarge(n_elements);
-		min_visibility.enlarge(n_elements);
-		payload.enlarge(n_elements);
-	}
-
+#if defined(__NVCC__) || (defined(__clang__) && defined(__CUDA__))
 	void copy_from_other_async(uint32_t n_elements, const RaysSdfSoa& other, cudaStream_t stream) {
-		CUDA_CHECK_THROW(cudaMemcpyAsync(pos.data(), other.pos.data(), n_elements * sizeof(Eigen::Vector3f), cudaMemcpyDeviceToDevice, stream));
-		CUDA_CHECK_THROW(cudaMemcpyAsync(normal.data(), other.normal.data(), n_elements * sizeof(Eigen::Vector3f), cudaMemcpyDeviceToDevice, stream));
-		CUDA_CHECK_THROW(cudaMemcpyAsync(distance.data(), other.distance.data(), n_elements * sizeof(float), cudaMemcpyDeviceToDevice, stream));
-		CUDA_CHECK_THROW(cudaMemcpyAsync(prev_distance.data(), other.prev_distance.data(), n_elements * sizeof(float), cudaMemcpyDeviceToDevice, stream));
-		CUDA_CHECK_THROW(cudaMemcpyAsync(total_distance.data(), other.total_distance.data(), n_elements * sizeof(float), cudaMemcpyDeviceToDevice, stream));
-		CUDA_CHECK_THROW(cudaMemcpyAsync(min_visibility.data(), other.min_visibility.data(), n_elements * sizeof(float), cudaMemcpyDeviceToDevice, stream));
-		CUDA_CHECK_THROW(cudaMemcpyAsync(payload.data(), other.payload.data(), n_elements * sizeof(SdfPayload), cudaMemcpyDeviceToDevice, stream));
+		CUDA_CHECK_THROW(cudaMemcpyAsync(pos, other.pos, n_elements * sizeof(vec3), cudaMemcpyDeviceToDevice, stream));
+		CUDA_CHECK_THROW(cudaMemcpyAsync(normal, other.normal, n_elements * sizeof(vec3), cudaMemcpyDeviceToDevice, stream));
+		CUDA_CHECK_THROW(cudaMemcpyAsync(distance, other.distance, n_elements * sizeof(float), cudaMemcpyDeviceToDevice, stream));
+		CUDA_CHECK_THROW(cudaMemcpyAsync(prev_distance, other.prev_distance, n_elements * sizeof(float), cudaMemcpyDeviceToDevice, stream));
+		CUDA_CHECK_THROW(cudaMemcpyAsync(total_distance, other.total_distance, n_elements * sizeof(float), cudaMemcpyDeviceToDevice, stream));
+		CUDA_CHECK_THROW(cudaMemcpyAsync(min_visibility, other.min_visibility, n_elements * sizeof(float), cudaMemcpyDeviceToDevice, stream));
+		CUDA_CHECK_THROW(cudaMemcpyAsync(payload, other.payload, n_elements * sizeof(SdfPayload), cudaMemcpyDeviceToDevice, stream));
 	}
 #endif
-	tcnn::GPUMemory<Eigen::Vector3f> pos;
-	tcnn::GPUMemory<Eigen::Vector3f> normal;
-	tcnn::GPUMemory<float> distance;
-	tcnn::GPUMemory<float> prev_distance;
-	tcnn::GPUMemory<float> total_distance;
-	tcnn::GPUMemory<float> min_visibility;
-	tcnn::GPUMemory<SdfPayload> payload;
+
+	void set(vec3* pos, vec3* normal, float* distance, float* prev_distance, float* total_distance, float* min_visibility, SdfPayload* payload) {
+		this->pos = pos;
+		this->normal = normal;
+		this->distance = distance;
+		this->prev_distance = prev_distance;
+		this->total_distance = total_distance;
+		this->min_visibility = min_visibility;
+		this->payload = payload;
+	}
+
+	vec3* pos;
+	vec3* normal;
+	float* distance;
+	float* prev_distance;
+	float* total_distance;
+	float* min_visibility;
+	SdfPayload* payload;
 };
 
 struct BRDFParams {
@@ -66,8 +67,8 @@ struct BRDFParams {
 	float sheen=0.f;
 	float clearcoat=0.f;
 	float clearcoat_gloss=0.f;
-	Eigen::Vector3f basecolor=Eigen::Vector3f(0.8f,0.8f,0.8f);
-	Eigen::Vector3f ambientcolor=Eigen::Vector3f(0.f,0.f,0.f);
+	vec3 basecolor=vec3(0.8f,0.8f,0.8f);
+	vec3 ambientcolor=vec3(0.f,0.f,0.f);
 };
 
 NGP_NAMESPACE_END

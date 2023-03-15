@@ -9,6 +9,7 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import argparse
+from glob import glob
 import os
 from pathlib import Path, PurePosixPath
 
@@ -20,24 +21,29 @@ import cv2
 import os
 import shutil
 
-def parse_args():
-	parser = argparse.ArgumentParser(description="convert a text colmap export to nerf format transforms.json; optionally convert video to images, and optionally run colmap in the first place")
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+SCRIPTS_FOLDER = os.path.join(ROOT_DIR, "scripts")
 
-	parser.add_argument("--video_in", default="", help="run ffmpeg first to convert a provided video file into a set of images. uses the video_fps parameter also")
+def parse_args():
+	parser = argparse.ArgumentParser(description="Convert a text colmap export to nerf format transforms.json; optionally convert video to images, and optionally run colmap in the first place.")
+
+	parser.add_argument("--video_in", default="", help="Run ffmpeg first to convert a provided video file into a set of images. Uses the video_fps parameter also.")
 	parser.add_argument("--video_fps", default=2)
-	parser.add_argument("--time_slice", default="", help="time (in seconds) in the format t1,t2 within which the images should be generated from the video. eg: \"--time_slice '10,300'\" will generate images only from 10th second to 300th second of the video")
+	parser.add_argument("--time_slice", default="", help="Time (in seconds) in the format t1,t2 within which the images should be generated from the video. E.g.: \"--time_slice '10,300'\" will generate images only from 10th second to 300th second of the video.")
 	parser.add_argument("--run_colmap", action="store_true", help="run colmap first on the image folder")
-	parser.add_argument("--colmap_matcher", default="sequential", choices=["exhaustive","sequential","spatial","transitive","vocab_tree"], help="select which matcher colmap should use. sequential for videos, exhaustive for adhoc images")
+	parser.add_argument("--colmap_matcher", default="sequential", choices=["exhaustive","sequential","spatial","transitive","vocab_tree"], help="Select which matcher colmap should use. Sequential for videos, exhaustive for ad-hoc images.")
 	parser.add_argument("--colmap_db", default="colmap.db", help="colmap database filename")
-	parser.add_argument("--colmap_camera_model", default="OPENCV", choices=["SIMPLE_PINHOLE", "PINHOLE", "SIMPLE_RADIAL", "RADIAL","OPENCV"], help="camera model")
-	parser.add_argument("--colmap_camera_params", default="", help="intrinsic parameters, depending on the chosen model.  Format: fx,fy,cx,cy,dist")
-	parser.add_argument("--images", default="images", help="input path to the images")
-	parser.add_argument("--text", default="colmap_text", help="input path to the colmap text files (set automatically if run_colmap is used)")
-	parser.add_argument("--aabb_scale", default=16, choices=["1","2","4","8","16"], help="large scene scale factor. 1=scene fits in unit cube; power of 2 up to 16")
-	parser.add_argument("--skip_early", default=0, help="skip this many images from the start")
-	parser.add_argument("--keep_colmap_coords", action="store_true", help="keep transforms.json in COLMAP's original frame of reference (this will avoid reorienting and repositioning the scene for preview and rendering)")
-	parser.add_argument("--out", default="transforms.json", help="output path")
-	parser.add_argument("--vocab_path", default="", help="vocabulary tree path")
+	parser.add_argument("--colmap_camera_model", default="OPENCV", choices=["SIMPLE_PINHOLE", "PINHOLE", "SIMPLE_RADIAL", "RADIAL", "OPENCV", "SIMPLE_RADIAL_FISHEYE", "RADIAL_FISHEYE", "OPENCV_FISHEYE"], help="Camera model")
+	parser.add_argument("--colmap_camera_params", default="", help="Intrinsic parameters, depending on the chosen model. Format: fx,fy,cx,cy,dist")
+	parser.add_argument("--images", default="images", help="Input path to the images.")
+	parser.add_argument("--text", default="colmap_text", help="Input path to the colmap text files (set automatically if --run_colmap is used).")
+	parser.add_argument("--aabb_scale", default=32, choices=["1", "2", "4", "8", "16", "32", "64", "128"], help="Large scene scale factor. 1=scene fits in unit cube; power of 2 up to 128")
+	parser.add_argument("--skip_early", default=0, help="Skip this many images from the start.")
+	parser.add_argument("--keep_colmap_coords", action="store_true", help="Keep transforms.json in COLMAP's original frame of reference (this will avoid reorienting and repositioning the scene for preview and rendering).")
+	parser.add_argument("--out", default="transforms.json", help="Output path.")
+	parser.add_argument("--vocab_path", default="", help="Vocabulary tree path.")
+	parser.add_argument("--overwrite", action="store_true", help="Do not ask for confirmation for overwriting existing images and COLMAP data.")
+	parser.add_argument("--mask_categories", nargs="*", type=str, default=[], help="Object categories that should be masked out from the training images. See `scripts/category2id.json` for supported categories.")
 	args = parser.parse_args()
 	return args
 
@@ -49,13 +55,28 @@ def do_system(arg):
 		sys.exit(err)
 
 def run_ffmpeg(args):
+	ffmpeg_binary = "ffmpeg"
+
+	# On Windows, if FFmpeg isn't found, try automatically downloading it from the internet
+	if os.name == "nt" and os.system(f"where {ffmpeg_binary} >nul 2>nul") != 0:
+		ffmpeg_glob = os.path.join(ROOT_DIR, "external", "ffmpeg", "*", "bin", "ffmpeg.exe")
+		candidates = glob(ffmpeg_glob)
+		if not candidates:
+			print("FFmpeg not found. Attempting to download FFmpeg from the internet.")
+			do_system(os.path.join(SCRIPTS_FOLDER, "download_ffmpeg.bat"))
+			candidates = glob(ffmpeg_glob)
+
+		if candidates:
+			ffmpeg_binary = candidates[0]
+
 	if not os.path.isabs(args.images):
 		args.images = os.path.join(os.path.dirname(args.video_in), args.images)
+
 	images = "\"" + args.images + "\""
 	video =  "\"" + args.video_in + "\""
 	fps = float(args.video_fps) or 1.0
 	print(f"running ffmpeg with input video file={video}, output image folder={images}, fps={fps}.")
-	if (input(f"warning! folder '{images}' will be deleted/replaced. continue? (Y/n)").lower().strip()+"y")[:1] != "y":
+	if not args.overwrite and (input(f"warning! folder '{images}' will be deleted/replaced. continue? (Y/n)").lower().strip()+"y")[:1] != "y":
 		sys.exit(1)
 	try:
 		# Passing Images' Path Without Double Quotes
@@ -69,9 +90,23 @@ def run_ffmpeg(args):
 	if time_slice:
 		start, end = time_slice.split(",")
 		time_slice_value = f",select='between(t\,{start}\,{end})'"
-	do_system(f"ffmpeg -i {video} -qscale:v 1 -qmin 1 -vf \"fps={fps}{time_slice_value}\" {images}/%04d.jpg")
+	do_system(f"{ffmpeg_binary} -i {video} -qscale:v 1 -qmin 1 -vf \"fps={fps}{time_slice_value}\" {images}/%04d.jpg")
 
 def run_colmap(args):
+	colmap_binary = "colmap"
+
+	# On Windows, if FFmpeg isn't found, try automatically downloading it from the internet
+	if os.name == "nt" and os.system(f"where {colmap_binary} >nul 2>nul") != 0:
+		colmap_glob = os.path.join(ROOT_DIR, "external", "colmap", "*", "COLMAP.bat")
+		candidates = glob(colmap_glob)
+		if not candidates:
+			print("COLMAP not found. Attempting to download COLMAP from the internet.")
+			do_system(os.path.join(SCRIPTS_FOLDER, "download_colmap.bat"))
+			candidates = glob(colmap_glob)
+
+		if candidates:
+			colmap_binary = candidates[0]
+
 	db = args.colmap_db
 	images = "\"" + args.images + "\""
 	db_noext=str(Path(db).with_suffix(""))
@@ -81,12 +116,12 @@ def run_colmap(args):
 	text=args.text
 	sparse=db_noext+"_sparse"
 	print(f"running colmap with:\n\tdb={db}\n\timages={images}\n\tsparse={sparse}\n\ttext={text}")
-	if (input(f"warning! folders '{sparse}' and '{text}' will be deleted/replaced. continue? (Y/n)").lower().strip()+"y")[:1] != "y":
+	if not args.overwrite and (input(f"warning! folders '{sparse}' and '{text}' will be deleted/replaced. continue? (Y/n)").lower().strip()+"y")[:1] != "y":
 		sys.exit(1)
 	if os.path.exists(db):
 		os.remove(db)
-	do_system(f"colmap feature_extractor --ImageReader.camera_model {args.colmap_camera_model} --ImageReader.camera_params \"{args.colmap_camera_params}\" --SiftExtraction.estimate_affine_shape=true --SiftExtraction.domain_size_pooling=true --ImageReader.single_camera 1 --database_path {db} --image_path {images}")
-	match_cmd = f"colmap {args.colmap_matcher}_matcher --SiftMatching.guided_matching=true --database_path {db}"
+	do_system(f"{colmap_binary} feature_extractor --ImageReader.camera_model {args.colmap_camera_model} --ImageReader.camera_params \"{args.colmap_camera_params}\" --SiftExtraction.estimate_affine_shape=true --SiftExtraction.domain_size_pooling=true --ImageReader.single_camera 1 --database_path {db} --image_path {images}")
+	match_cmd = f"{colmap_binary} {args.colmap_matcher}_matcher --SiftMatching.guided_matching=true --database_path {db}"
 	if args.vocab_path:
 		match_cmd += f" --VocabTreeMatching.vocab_tree_path {args.vocab_path}"
 	do_system(match_cmd)
@@ -95,14 +130,14 @@ def run_colmap(args):
 	except:
 		pass
 	do_system(f"mkdir {sparse}")
-	do_system(f"colmap mapper --database_path {db} --image_path {images} --output_path {sparse}")
-	do_system(f"colmap bundle_adjuster --input_path {sparse}/0 --output_path {sparse}/0 --BundleAdjustment.refine_principal_point 1")
+	do_system(f"{colmap_binary} mapper --database_path {db} --image_path {images} --output_path {sparse}")
+	do_system(f"{colmap_binary} bundle_adjuster --input_path {sparse}/0 --output_path {sparse}/0 --BundleAdjustment.refine_principal_point 1")
 	try:
 		shutil.rmtree(text)
 	except:
 		pass
 	do_system(f"mkdir {text}")
-	do_system(f"colmap model_converter --input_path {sparse}/0 --output_path {text} --output_type TXT")
+	do_system(f"{colmap_binary} model_converter --input_path {sparse}/0 --output_path {text} --output_type TXT")
 
 def variance_of_laplacian(image):
 	return cv2.Laplacian(image, cv2.CV_64F).var()
@@ -182,10 +217,13 @@ if __name__ == "__main__":
 			fl_y = float(els[4])
 			k1 = 0
 			k2 = 0
+			k3 = 0
+			k4 = 0
 			p1 = 0
 			p2 = 0
 			cx = w / 2
 			cy = h / 2
+			is_fisheye = False
 			if els[1] == "SIMPLE_PINHOLE":
 				cx = float(els[5])
 				cy = float(els[6])
@@ -210,8 +248,28 @@ if __name__ == "__main__":
 				k2 = float(els[9])
 				p1 = float(els[10])
 				p2 = float(els[11])
+			elif els[1] == "SIMPLE_RADIAL_FISHEYE":
+				is_fisheye = True
+				cx = float(els[5])
+				cy = float(els[6])
+				k1 = float(els[7])
+			elif els[1] == "RADIAL_FISHEYE":
+				is_fisheye = True
+				cx = float(els[5])
+				cy = float(els[6])
+				k1 = float(els[7])
+				k2 = float(els[8])
+			elif els[1] == "OPENCV_FISHEYE":
+				is_fisheye = True
+				fl_y = float(els[5])
+				cx = float(els[6])
+				cy = float(els[7])
+				k1 = float(els[8])
+				k2 = float(els[9])
+				k3 = float(els[10])
+				k4 = float(els[11])
 			else:
-				print("unknown camera model ", els[1])
+				print("Unknown camera model ", els[1])
 			# fl = 0.5 * w / tan(0.5 * angle_x);
 			angle_x = math.atan(w / (fl_x * 2)) * 2
 			angle_y = math.atan(h / (fl_y * 2)) * 2
@@ -230,8 +288,11 @@ if __name__ == "__main__":
 			"fl_y": fl_y,
 			"k1": k1,
 			"k2": k2,
+			"k3": k3,
+			"k4": k4,
 			"p1": p1,
 			"p2": p2,
+			"is_fisheye": is_fisheye,
 			"cx": cx,
 			"cy": cy,
 			"w": w,
@@ -254,7 +315,7 @@ if __name__ == "__main__":
 				# why is this requireing a relitive path while using ^
 				image_rel = os.path.relpath(IMAGE_FOLDER)
 				name = str(f"./{image_rel}/{'_'.join(elems[9:])}")
-				b=sharpness(name)
+				b = sharpness(name)
 				print(name, "sharpness=",b)
 				image_id = int(elems[0])
 				qvec = np.array(tuple(map(float, elems[1:5])))
@@ -266,12 +327,12 @@ if __name__ == "__main__":
 				if not args.keep_colmap_coords:
 					c2w[0:3,2] *= -1 # flip the y and z axis
 					c2w[0:3,1] *= -1
-					c2w = c2w[[1,0,2,3],:] # swap y and z
+					c2w = c2w[[1,0,2,3],:]
 					c2w[2,:] *= -1 # flip whole world upside down
 
 					up += c2w[0:3,1]
 
-				frame={"file_path":name,"sharpness":b,"transform_matrix": c2w}
+				frame = {"file_path":name,"sharpness":b,"transform_matrix": c2w}
 				out["frames"].append(frame)
 	nframes = len(out["frames"])
 
@@ -329,3 +390,51 @@ if __name__ == "__main__":
 	print(f"writing {OUT_PATH}")
 	with open(OUT_PATH, "w") as outfile:
 		json.dump(out, outfile, indent=2)
+
+	if len(args.mask_categories) > 0:
+		# Check if detectron2 is installed. If not, install it.
+		try:
+			import detectron2
+		except ModuleNotFoundError:
+			try:
+				import torch
+			except ModuleNotFoundError:
+				print("PyTorch is not installed. For automatic masking, install PyTorch from https://pytorch.org/")
+				sys.exit(1)
+
+			input("Detectron2 is not installed. Press enter to install it.")
+			import subprocess
+			package = 'git+https://github.com/facebookresearch/detectron2.git'
+			subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+			import detectron2
+
+		import torch
+		from pathlib import Path
+		from detectron2.config import get_cfg
+		from detectron2 import model_zoo
+		from detectron2.engine import DefaultPredictor
+
+		category2id = json.load(open(SCRIPTS_FOLDER / "category2id.json", "r"))
+		mask_ids = [category2id[c] for c in args.mask_categories]
+
+		cfg = get_cfg()
+		# Add project-specific config (e.g., TensorMask) here if you're not running a model in detectron2's core library
+		cfg.merge_from_file(model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"))
+		cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.5  # set threshold for this model
+		# Find a model from detectron2's model zoo.
+		cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml")
+		predictor = DefaultPredictor(cfg)
+
+		for frame in out['frames']:
+			img = cv2.imread(frame['file_path'])
+			outputs = predictor(img)
+
+			output_mask = np.zeros((img.shape[0], img.shape[1]))
+			for i in range(len(outputs['instances'])):
+				if outputs['instances'][i].pred_classes.cpu().numpy()[0] in mask_ids:
+					pred_mask = outputs['instances'][i].pred_masks.cpu().numpy()[0]
+					output_mask = np.logical_or(output_mask, pred_mask)
+
+			rgb_path = Path(frame['file_path'])
+			mask_name = str(rgb_path.parents[0] / Path('dynamic_mask_' + rgb_path.name.replace('.jpg', '.png')))
+			cv2.imwrite(mask_name, (output_mask*255).astype(np.uint8))

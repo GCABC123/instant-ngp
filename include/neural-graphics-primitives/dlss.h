@@ -16,8 +16,6 @@
 
 #include <neural-graphics-primitives/common.h>
 
-#include <Eigen/Dense>
-
 #include <memory>
 
 NGP_NAMESPACE_BEGIN
@@ -26,11 +24,16 @@ class IDlss {
 public:
 	virtual ~IDlss() {}
 
+	virtual void update_feature(
+		const ivec2& in_resolution,
+		bool is_hdr,
+		bool sharpen
+	) = 0;
 	virtual void run(
-		const Eigen::Vector2i& in_resolution,
+		const ivec2& in_resolution,
 		bool is_hdr,
 		float sharpening,
-		const Eigen::Vector2f& jitter_offset,
+		const vec2& jitter_offset,
 		bool shall_reset
 	) = 0;
 
@@ -40,23 +43,25 @@ public:
 	virtual cudaSurfaceObject_t exposure() = 0;
 	virtual cudaSurfaceObject_t output() = 0;
 
-	virtual Eigen::Vector2i clamp_resolution(const Eigen::Vector2i& resolution) const = 0;
-	virtual Eigen::Vector2i out_resolution() const = 0;
+	virtual ivec2 clamp_resolution(const ivec2& resolution) const = 0;
+	virtual ivec2 out_resolution() const = 0;
+	virtual ivec2 max_out_resolution() const = 0;
 
 	virtual bool is_hdr() const = 0;
+	virtual bool sharpen() const = 0;
 	virtual EDlssQuality quality() const = 0;
 };
 
-#ifdef NGP_VULKAN
-std::shared_ptr<IDlss> dlss_init(const Eigen::Vector2i& out_resolution);
+class IDlssProvider {
+public:
+	virtual ~IDlssProvider() {}
 
-void vulkan_and_ngx_init();
-size_t dlss_allocated_bytes();
-void vulkan_and_ngx_destroy();
-#else
-inline size_t dlss_allocated_bytes() {
-	return 0;
-}
+	virtual size_t allocated_bytes() const = 0;
+	virtual std::unique_ptr<IDlss> init_dlss(const ivec2& out_resolution) = 0;
+};
+
+#ifdef NGP_VULKAN
+std::shared_ptr<IDlssProvider> init_vulkan_and_ngx();
 #endif
 
 NGP_NAMESPACE_END
